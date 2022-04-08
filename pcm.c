@@ -47,13 +47,6 @@
 #include <sound/asound.h>
 
 #include <tinyalsa/asoundlib.h>
-#include "pcm_io.h"
-#include "snd_utils.h"
-
-enum {
-    PCM_NODE_TYPE_HW = 0,
-    PCM_NODE_TYPE_PLUGIN,
-};
 
 #define PARAM_MAX SNDRV_PCM_HW_PARAM_LAST_INTERVAL
 
@@ -129,9 +122,6 @@ static const char * const format_lookup[] = {
         "DSD_U16_LE",
 #endif
 };
-
-extern struct pcm_ops hw_ops;
-extern struct pcm_ops plug_ops;
 
 /* refer to SNDRV_PCM_SUBFORMAT_##index in sound/asound.h. */
 static const char * const subformat_lookup[] = {
@@ -267,10 +257,6 @@ struct pcm {
     unsigned int noirq_frames_per_msec;
     int wait_for_avail_min;
     unsigned int subdevice;
-
-    struct pcm_ops *ops;
-    void *data;
-    void *snd_node;
 };
 
 unsigned int pcm_get_buffer_size(struct pcm *pcm)
@@ -350,8 +336,7 @@ unsigned int pcm_frames_to_bytes(struct pcm *pcm, unsigned int frames)
 static int pcm_sync_ptr(struct pcm *pcm, int flags) {
     if (pcm->sync_ptr) {
         pcm->sync_ptr->flags = flags;
-        if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SYNC_PTR,
-                            pcm->sync_ptr) < 0)
+        if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_SYNC_PTR, pcm->sync_ptr) < 0)
             return -1;
     }
     return 0;
@@ -363,19 +348,19 @@ static int pcm_hw_mmap_status(struct pcm *pcm) {
         return 0;
 
     int page_size = sysconf(_SC_PAGE_SIZE);
-    pcm->mmap_status = pcm->ops->mmap(pcm->data, NULL, page_size, PROT_READ, MAP_FILE | MAP_SHARED,
-                                      SNDRV_PCM_MMAP_OFFSET_STATUS);
+    pcm->mmap_status = mmap(NULL, page_size, PROT_READ, MAP_FILE | MAP_SHARED,
+                            pcm->fd, SNDRV_PCM_MMAP_OFFSET_STATUS);
     if (pcm->mmap_status == MAP_FAILED)
         pcm->mmap_status = NULL;
     if (!pcm->mmap_status)
         goto mmap_error;
 
-    pcm->mmap_control = pcm->ops->mmap(pcm->data, NULL, page_size, PROT_READ | PROT_WRITE,
-                             MAP_FILE | MAP_SHARED, SNDRV_PCM_MMAP_OFFSET_CONTROL);
+    pcm->mmap_control = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+                             MAP_FILE | MAP_SHARED, pcm->fd, SNDRV_PCM_MMAP_OFFSET_CONTROL);
     if (pcm->mmap_control == MAP_FAILED)
         pcm->mmap_control = NULL;
     if (!pcm->mmap_control) {
-        pcm->ops->munmap(pcm->data, pcm->mmap_status, page_size);
+        munmap(pcm->mmap_status, page_size);
         pcm->mmap_status = NULL;
         goto mmap_error;
     }
@@ -410,9 +395,9 @@ static void pcm_hw_munmap_status(struct pcm *pcm) {
     } else {
         int page_size = sysconf(_SC_PAGE_SIZE);
         if (pcm->mmap_status)
-            pcm->ops->munmap(pcm->data, pcm->mmap_status, page_size);
+            munmap(pcm->mmap_status, page_size);
         if (pcm->mmap_control)
-            pcm->ops->munmap(pcm->data, pcm->mmap_control, page_size);
+            munmap(pcm->mmap_control, page_size);
     }
     pcm->mmap_status = NULL;
     pcm->mmap_control = NULL;
@@ -547,12 +532,12 @@ int pcm_write(struct pcm *pcm, const void *data, unsigned int count)
             int prepare_error = pcm_prepare(pcm);
             if (prepare_error)
                 return prepare_error;
-            if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x))
+            if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x))
                 return oops(pcm, errno, "cannot write initial data");
             pcm->running = 1;
             return 0;
         }
-        if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x)) {
+        if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x)) {
             pcm->prepared = 0;
             pcm->running = 0;
             if (errno == EPIPE) {
@@ -588,7 +573,7 @@ int pcm_read(struct pcm *pcm, void *data, unsigned int count)
                 return -errno;
             }
         }
-        if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_READI_FRAMES, &x)) {
+        if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_READI_FRAMES, &x)) {
             pcm->prepared = 0;
             pcm->running = 0;
             if (errno == EPIPE) {
@@ -610,22 +595,15 @@ struct pcm_params *pcm_params_get(unsigned int card, unsigned int device,
                                   unsigned int flags)
 {
     struct snd_pcm_hw_params *params;
-    enum snd_node_type pcm_type;
-    struct pcm_ops *ops;
-    void *snd_node, *data;
+    char fn[256];
     int fd;
 
-    snd_node = snd_utils_get_dev_node(card, device, NODE_PCM);
-    pcm_type = snd_utils_get_node_type(snd_node);
-    if (pcm_type == SND_NODE_TYPE_PLUGIN)
-        ops = &plug_ops;
-    else
-        ops = &hw_ops;
+    snprintf(fn, sizeof(fn), "/dev/snd/pcmC%uD%u%c", card, device,
+             flags & PCM_IN ? 'c' : 'p');
 
-    fd = ops->open(card, device, flags, &data, snd_node);
+    fd = open(fn, O_RDWR);
     if (fd < 0) {
-        fprintf(stderr, "cannot open device %u for card %u\n",
-                device, card);
+        fprintf(stderr, "cannot open device '%s'\n", fn);
         goto err_open;
     }
 
@@ -634,22 +612,20 @@ struct pcm_params *pcm_params_get(unsigned int card, unsigned int device,
         goto err_calloc;
 
     param_init(params);
-    if (ops->ioctl(data, SNDRV_PCM_IOCTL_HW_REFINE, params)) {
+    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_REFINE, params)) {
         fprintf(stderr, "SNDRV_PCM_IOCTL_HW_REFINE error (%d)\n", errno);
         goto err_hw_refine;
     }
 
-    snd_utils_put_dev_node(snd_node);
-    ops->close(data);
+    close(fd);
 
     return (struct pcm_params *)params;
 
 err_hw_refine:
     free(params);
 err_calloc:
-    ops->close(data);
+    close(fd);
 err_open:
-    snd_utils_put_dev_node(snd_node);
     return NULL;
 }
 
@@ -712,7 +688,7 @@ static int pcm_param_to_alsa(enum pcm_param param)
     }
 }
 
-struct pcm_mask *pcm_params_get_mask(const struct pcm_params *pcm_params,
+struct pcm_mask *pcm_params_get_mask(struct pcm_params *pcm_params,
                                      enum pcm_param param)
 {
     int p;
@@ -729,7 +705,7 @@ struct pcm_mask *pcm_params_get_mask(const struct pcm_params *pcm_params,
     return (struct pcm_mask *)param_to_mask(params, p);
 }
 
-unsigned int pcm_params_get_min(const struct pcm_params *pcm_params,
+unsigned int pcm_params_get_min(struct pcm_params *pcm_params,
                                 enum pcm_param param)
 {
     struct snd_pcm_hw_params *params = (struct snd_pcm_hw_params *)pcm_params;
@@ -761,7 +737,7 @@ void pcm_params_set_min(struct pcm_params *pcm_params,
     param_set_min(params, p, val);
 }
 
-unsigned int pcm_params_get_max(const struct pcm_params *pcm_params,
+unsigned int pcm_params_get_max(struct pcm_params *pcm_params,
                                 enum pcm_param param)
 {
     struct snd_pcm_hw_params *params = (struct snd_pcm_hw_params *)pcm_params;
@@ -883,14 +859,11 @@ int pcm_close(struct pcm *pcm)
 
     if (pcm->flags & PCM_MMAP) {
         pcm_stop(pcm);
-        pcm->ops->munmap(pcm->data, pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
+        munmap(pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
     }
 
-    if (pcm->data)
-        pcm->ops->close(pcm->data);
-    if (pcm->snd_node)
-        snd_utils_put_dev_node(pcm->snd_node);
-
+    if (pcm->fd >= 0)
+        close(pcm->fd);
     pcm->prepared = 0;
     pcm->running = 0;
     pcm->buffer_size = 0;
@@ -906,36 +879,36 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
     struct snd_pcm_info info;
     struct snd_pcm_hw_params params;
     struct snd_pcm_sw_params sparams;
-    int rc, pcm_type;
+    char fn[256];
+    int rc;
 
     if (!config) {
         return &bad_pcm; /* TODO: could support default config here */
     }
     pcm = calloc(1, sizeof(struct pcm));
-    if (!pcm) {
-        oops(&bad_pcm, ENOMEM, "can't allocate PCM object");
+    if (!pcm)
         return &bad_pcm; /* TODO: could support default config here */
-    }
 
     pcm->config = *config;
+
+    snprintf(fn, sizeof(fn), "/dev/snd/pcmC%uD%u%c", card, device,
+             flags & PCM_IN ? 'c' : 'p');
+
     pcm->flags = flags;
-
-    pcm->snd_node = snd_utils_get_dev_node(card, device, NODE_PCM);
-    pcm_type = snd_utils_get_node_type(pcm->snd_node);
-    if (pcm_type == SND_NODE_TYPE_PLUGIN)
-        pcm->ops = &plug_ops;
-    else
-        pcm->ops = &hw_ops;
-
-    pcm->fd = pcm->ops->open(card, device, flags, &pcm->data, pcm->snd_node);
+    pcm->fd = open(fn, O_RDWR|O_NONBLOCK);
     if (pcm->fd < 0) {
-        oops(&bad_pcm, errno, "cannot open device %u for card %u",
-             device, card);
-        goto fail_open;
+        oops(pcm, errno, "cannot open device '%s'", fn);
+        return pcm;
     }
 
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_INFO, &info)) {
-        oops(&bad_pcm, errno, "cannot get info");
+    if (fcntl(pcm->fd, F_SETFL, fcntl(pcm->fd, F_GETFL) &
+              ~O_NONBLOCK) < 0) {
+        oops(pcm, errno, "failed to reset blocking mode '%s'", fn);
+        goto fail_close;
+    }
+
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_INFO, &info)) {
+        oops(pcm, errno, "cannot get info");
         goto fail_close;
     }
     pcm->subdevice = info.subdevice;
@@ -957,7 +930,7 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
 
     if (flags & PCM_NOIRQ) {
         if (!(flags & PCM_MMAP)) {
-            oops(&bad_pcm, EINVAL, "noirq only currently supported with mmap().");
+            oops(pcm, EINVAL, "noirq only currently supported with mmap().");
             goto fail_close;
         }
 
@@ -972,8 +945,8 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
         param_set_mask(&params, SNDRV_PCM_HW_PARAM_ACCESS,
                        SNDRV_PCM_ACCESS_RW_INTERLEAVED);
 
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_HW_PARAMS, &params)) {
-        oops(&bad_pcm, errno, "cannot set hw params");
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_HW_PARAMS, &params)) {
+        oops(pcm, errno, "cannot set hw params");
         goto fail_close;
     }
 
@@ -983,11 +956,10 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
     pcm->buffer_size = config->period_count * config->period_size;
 
     if (flags & PCM_MMAP) {
-        pcm->mmap_buffer = pcm->ops->mmap(pcm->data, NULL,
-                pcm_frames_to_bytes(pcm, pcm->buffer_size),
-                PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, 0);
+        pcm->mmap_buffer = mmap(NULL, pcm_frames_to_bytes(pcm, pcm->buffer_size),
+                                PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, pcm->fd, 0);
         if (pcm->mmap_buffer == MAP_FAILED) {
-            oops(&bad_pcm, errno, "failed to mmap buffer %d bytes\n",
+            oops(pcm, errno, "failed to mmap buffer %d bytes\n",
                  pcm_frames_to_bytes(pcm, pcm->buffer_size));
             goto fail_close;
         }
@@ -1034,23 +1006,23 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
     while (pcm->boundary * 2 <= INT_MAX - pcm->buffer_size)
         pcm->boundary *= 2;
 
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SW_PARAMS, &sparams)) {
-        oops(&bad_pcm, errno, "cannot set sw params");
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_SW_PARAMS, &sparams)) {
+        oops(pcm, errno, "cannot set sw params");
         goto fail;
     }
 
     rc = pcm_hw_mmap_status(pcm);
     if (rc < 0) {
-        oops(&bad_pcm, errno, "mmap status failed");
+        oops(pcm, errno, "mmap status failed");
         goto fail;
     }
 
 #ifdef SNDRV_PCM_IOCTL_TTSTAMP
     if (pcm->flags & PCM_MONOTONIC) {
         int arg = SNDRV_PCM_TSTAMP_TYPE_MONOTONIC;
-        rc = pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_TTSTAMP, &arg);
+        rc = ioctl(pcm->fd, SNDRV_PCM_IOCTL_TTSTAMP, &arg);
         if (rc < 0) {
-            oops(&bad_pcm, errno, "cannot set timestamp type");
+            oops(pcm, errno, "cannot set timestamp type");
             goto fail;
         }
     }
@@ -1061,14 +1033,11 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
 
 fail:
     if (flags & PCM_MMAP)
-        pcm->ops->munmap(pcm->data, pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
+        munmap(pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
 fail_close:
-    pcm->ops->close(pcm->data);
-
-fail_open:
-    snd_utils_put_dev_node(pcm->snd_node);
-    free(pcm);
-    return &bad_pcm;
+    close(pcm->fd);
+    pcm->fd = -1;
+    return pcm;
 }
 
 int pcm_is_ready(struct pcm *pcm)
@@ -1081,7 +1050,7 @@ int pcm_prepare(struct pcm *pcm)
     if (pcm->prepared)
         return 0;
 
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_PREPARE) < 0)
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_PREPARE) < 0)
         return oops(pcm, errno, "cannot prepare channel");
 
     pcm->prepared = 1;
@@ -1095,9 +1064,9 @@ int pcm_start(struct pcm *pcm)
         return prepare_error;
 
     if (pcm->flags & PCM_MMAP)
-        pcm_sync_ptr(pcm, 0);
+	    pcm_sync_ptr(pcm, 0);
 
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_START) < 0)
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_START) < 0)
         return oops(pcm, errno, "cannot start channel");
 
     pcm->running = 1;
@@ -1106,7 +1075,7 @@ int pcm_start(struct pcm *pcm)
 
 int pcm_stop(struct pcm *pcm)
 {
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_DROP) < 0)
+    if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_DROP) < 0)
         return oops(pcm, errno, "cannot stop channel");
 
     pcm->prepared = 0;
@@ -1226,7 +1195,7 @@ int pcm_wait(struct pcm *pcm, int timeout)
 
     do {
         /* let's wait for avail or timeout */
-        err = pcm->ops->poll(pcm->data, &pfd, 1, timeout);
+        err = poll(&pfd, 1, timeout);
         if (err < 0)
             return -errno;
 
@@ -1282,7 +1251,7 @@ int pcm_mmap_transfer(struct pcm *pcm, const void *buffer, unsigned int bytes)
         }
 
         /* start the audio if we reach the threshold */
-        if (!pcm->running &&
+	    if (!pcm->running &&
             (pcm->buffer_size - avail) >= pcm->config.start_threshold) {
             if (pcm_start(pcm) < 0) {
                fprintf(stderr, "start error: hw 0x%x app 0x%x avail 0x%x\n",
@@ -1378,5 +1347,5 @@ int pcm_ioctl(struct pcm *pcm, int request, ...)
     arg = va_arg(ap, void *);
     va_end(ap);
 
-    return pcm->ops->ioctl(pcm->data, request, arg);
+    return ioctl(pcm->fd, request, arg);
 }
