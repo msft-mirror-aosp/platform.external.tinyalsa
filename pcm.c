@@ -256,7 +256,7 @@ struct pcm {
     unsigned int flags;
     bool running:1;
     bool prepared:1;
-    int underruns;
+    int xruns;
     unsigned int buffer_size;
     unsigned long boundary;
     char error[PCM_ERROR_MAX];
@@ -561,7 +561,7 @@ int pcm_write(struct pcm *pcm, const void *data, unsigned int count)
                 /* we failed to make our window -- try to restart if we are
                  * allowed to do so.  Otherwise, simply allow the EPIPE error to
                  * propagate up to the app level */
-                pcm->underruns++;
+                pcm->xruns++;
                 if (pcm->flags & PCM_NORESTART)
                     return -EPIPE;
                 continue;
@@ -595,7 +595,7 @@ int pcm_read(struct pcm *pcm, void *data, unsigned int count)
             pcm->running = false;
             if (errno == EPIPE) {
                     /* we failed to make our window -- try to restart */
-                pcm->underruns++;
+                pcm->xruns++;
                 continue;
             }
             return oops(pcm, errno, "cannot read stream data");
@@ -1055,7 +1055,7 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
     }
 #endif
 
-    pcm->underruns = 0;
+    pcm->xruns = 0;
     return pcm;
 
 fail:
@@ -1381,4 +1381,8 @@ int pcm_ioctl(struct pcm *pcm, int request, ...)
     va_end(ap);
 
     return pcm->ops->ioctl(pcm->data, request, arg);
+}
+
+int pcm_get_xruns(struct pcm *pcm) {
+    return pcm->xruns;
 }
