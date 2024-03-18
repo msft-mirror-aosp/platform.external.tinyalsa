@@ -20,9 +20,6 @@ cc_library {
     host_supported: true,
     vendor_available: true,
     product_available: true,
-    vndk: {
-        enabled: true,
-    },
     srcs: [
         "mixer.c",
         "mixer_hw.c",
