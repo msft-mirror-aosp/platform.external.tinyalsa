@@ -31,6 +31,8 @@
 #ifndef __MIXER_PLUGIN_H__
 #define __MIXER_PLUGIN_H__
 
+#include <pthread.h>
+
 #define MIXER_PLUGIN_OPEN_FN(name)                             \
     int name##_open(struct mixer_plugin **plugin,              \
                     unsigned int card)
@@ -78,6 +80,7 @@ struct mixer_plugin {
 
     struct snd_control *controls;
     unsigned int num_controls;
+    pthread_mutex_t mutex;
 };
 
 struct snd_value_enum {
