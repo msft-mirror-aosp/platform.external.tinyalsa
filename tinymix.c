@@ -201,7 +201,6 @@ static int tinymix_detail_control(struct mixer *mixer, const char *control,
     int min, max;
     int ret;
     char *buf = NULL;
-    size_t len;
     unsigned int tlv_header_size = 0;
     const char *space = g_tabs_only ? "\t" : " ";
 
@@ -218,7 +217,7 @@ static int tinymix_detail_control(struct mixer *mixer, const char *control,
     type = mixer_ctl_get_type(ctl);
     num_values = mixer_ctl_get_num_values(ctl);
 
-    if (type == MIXER_CTL_TYPE_BYTE) {
+    if ((type == MIXER_CTL_TYPE_BYTE) && (num_values > 0)) {
         if (mixer_ctl_is_access_tlv_rw(ctl)) {
             tlv_header_size = TLV_HEADER_SIZE;
         }
@@ -228,8 +227,7 @@ static int tinymix_detail_control(struct mixer *mixer, const char *control,
             return ENOENT;
         }
 
-        len = num_values;
-        ret = mixer_ctl_get_array(ctl, buf, len + tlv_header_size);
+        ret = mixer_ctl_get_array(ctl, buf, num_values + tlv_header_size);
         if (ret < 0) {
             fprintf(stderr, "Failed to mixer_ctl_get_array\n");
             free(buf);
