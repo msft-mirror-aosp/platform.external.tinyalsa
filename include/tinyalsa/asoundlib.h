@@ -293,6 +293,9 @@ int pcm_set_avail_min(struct pcm *pcm, int avail_min);
 /* Gets the count of underruns for playback and count of overruns for capture. */
 int pcm_get_xruns(struct pcm *pcm);
 
+/* Sets pcm sw config */
+int pcm_set_sw_config(struct pcm *pcm, struct pcm_config *config);
+
 /*
  * MIXER API
  */

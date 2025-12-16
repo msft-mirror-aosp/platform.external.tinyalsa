@@ -907,7 +907,6 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
     struct pcm *pcm;
     struct snd_pcm_info info;
     struct snd_pcm_hw_params params;
-    struct snd_pcm_sw_params sparams;
     int rc, pcm_type;
 
     if (!config) {
@@ -981,7 +980,9 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
 
     /* get our refined hw_params */
     config->period_size = param_get_int(&params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+    pcm->config.period_size = config->period_size;
     config->period_count = param_get_int(&params, SNDRV_PCM_HW_PARAM_PERIODS);
+    pcm->config.period_count = config->period_count;
     pcm->buffer_size = config->period_count * config->period_size;
 
     if (flags & PCM_MMAP) {
@@ -995,48 +996,11 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
         }
     }
 
-    memset(&sparams, 0, sizeof(sparams));
-    sparams.tstamp_mode = SNDRV_PCM_TSTAMP_ENABLE;
-    sparams.period_step = 1;
-
-    if (!config->start_threshold) {
-        if (pcm->flags & PCM_IN)
-            pcm->config.start_threshold = sparams.start_threshold = 1;
-        else
-            pcm->config.start_threshold = sparams.start_threshold =
-                config->period_count * config->period_size / 2;
-    } else
-        sparams.start_threshold = config->start_threshold;
-
-    /* pick a high stop threshold - todo: does this need further tuning */
-    if (!config->stop_threshold) {
-        if (pcm->flags & PCM_IN)
-            pcm->config.stop_threshold = sparams.stop_threshold =
-                config->period_count * config->period_size * 10;
-        else
-            pcm->config.stop_threshold = sparams.stop_threshold =
-                config->period_count * config->period_size;
-    }
-    else
-        sparams.stop_threshold = config->stop_threshold;
-
-    if (!pcm->config.avail_min) {
-        if (pcm->flags & PCM_MMAP)
-            pcm->config.avail_min = sparams.avail_min = pcm->config.period_size;
-        else
-            pcm->config.avail_min = sparams.avail_min = 1;
-    } else
-        sparams.avail_min = config->avail_min;
-
-    sparams.xfer_align = config->period_size / 2; /* needed for old kernels */
-    sparams.silence_threshold = config->silence_threshold;
-    sparams.silence_size = config->silence_size;
-
-    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SW_PARAMS, &sparams)) {
+    rc = pcm_set_sw_config(pcm, config);
+    if (rc < 0) {
         oops(&bad_pcm, errno, "cannot set sw params");
         goto fail;
     }
-    pcm->boundary = sparams.boundary;
 
     rc = pcm_hw_mmap_status(pcm);
     if (rc < 0) {
@@ -1385,4 +1349,60 @@ int pcm_ioctl(struct pcm *pcm, int request, ...)
 
 int pcm_get_xruns(struct pcm *pcm) {
     return pcm->xruns;
+}
+
+int pcm_set_sw_config(struct pcm *pcm, struct pcm_config *config)
+{
+    if (!pcm || !pcm_is_ready(pcm) || !config)
+        return -EFAULT;
+
+    struct snd_pcm_sw_params sparams;
+    memset(&sparams, 0, sizeof(sparams));
+    sparams.tstamp_mode = SNDRV_PCM_TSTAMP_ENABLE;
+    sparams.period_step = 1;
+
+    if (!config->start_threshold) {
+        if (pcm->flags & PCM_IN)
+            pcm->config.start_threshold = sparams.start_threshold = 1;
+        else
+            pcm->config.start_threshold = sparams.start_threshold =
+                pcm->config.period_count * pcm->config.period_size / 2;
+    } else {
+        pcm->config.start_threshold = sparams.start_threshold =
+            config->start_threshold;
+    }
+
+    /* pick a high stop threshold - todo: does this need further tuning */
+    if (!config->stop_threshold) {
+        if (pcm->flags & PCM_IN)
+            pcm->config.stop_threshold = sparams.stop_threshold =
+                pcm->config.period_count * pcm->config.period_size * 10;
+        else
+            pcm->config.stop_threshold = sparams.stop_threshold =
+                pcm->config.period_count * pcm->config.period_size;
+    } else {
+        pcm->config.stop_threshold = sparams.stop_threshold =
+            config->stop_threshold;
+    }
+
+    if (!config->avail_min) {
+        if (pcm->flags & PCM_MMAP)
+            pcm->config.avail_min = sparams.avail_min = pcm->config.period_size;
+        else
+            pcm->config.avail_min = sparams.avail_min = 1;
+    } else {
+        pcm->config.avail_min = sparams.avail_min = config->avail_min;
+    }
+
+    sparams.xfer_align = pcm->config.period_size / 2; /* needed for old kernels */
+    sparams.silence_threshold = config->silence_threshold;
+    pcm->config.silence_threshold = config->silence_threshold;
+    sparams.silence_size = config->silence_size;
+    pcm->config.silence_size = config->silence_size;
+
+    if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SW_PARAMS, &sparams)) {
+        return oops(pcm, errno, "cannot set sw params");
+    }
+    pcm->boundary = sparams.boundary;
+    return 0;
 }
