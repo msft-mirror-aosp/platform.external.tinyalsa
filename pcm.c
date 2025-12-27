@@ -1351,7 +1351,7 @@ int pcm_get_xruns(struct pcm *pcm) {
     return pcm->xruns;
 }
 
-int pcm_set_sw_config(struct pcm *pcm, struct pcm_config *config)
+int pcm_set_sw_config(struct pcm *pcm, const struct pcm_config *config)
 {
     if (!pcm || !pcm_is_ready(pcm) || !config)
         return -EFAULT;

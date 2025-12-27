@@ -294,7 +294,7 @@ int pcm_set_avail_min(struct pcm *pcm, int avail_min);
 int pcm_get_xruns(struct pcm *pcm);
 
 /* Sets pcm sw config */
-int pcm_set_sw_config(struct pcm *pcm, struct pcm_config *config);
+int pcm_set_sw_config(struct pcm *pcm, const struct pcm_config *config);
 
 /*
  * MIXER API
